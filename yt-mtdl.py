@@ -680,19 +680,37 @@ class MainWindow(QMainWindow):
         if file_path:
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    urls = [line.strip() for line in f if line.strip()]
+                    lines = [line.strip() for line in f if line.strip()]
                 
-                if urls:
+                # Parse URLs and episode identifiers
+                parsed_urls = []
+                for line in lines:
+                    parts = line.split()
+                    if len(parts) >= 2:  # Has both identifier and URL
+                        episode_id = parts[0]
+                        url = parts[-1]  # Take the last part as URL
+                        parsed_urls.append({
+                            'episode_id': episode_id,
+                            'url': url
+                        })
+                    elif len(parts) == 1:  # Only URL
+                        parsed_urls.append({
+                            'episode_id': None,
+                            'url': parts[0]
+                        })
+                
+                if parsed_urls:
                     self.url_list.clear()
-                    self.url_list.append(f"Found {len(urls)} URLs:")
-                    for url in urls:
-                        self.url_list.append(url)
+                    self.url_list.append(f"Found {len(parsed_urls)} URLs:")
+                    for entry in parsed_urls:
+                        display_text = f"{entry['episode_id']} - {entry['url']}" if entry['episode_id'] else entry['url']
+                        self.url_list.append(display_text)
                     
-                    self.pending_urls = urls
+                    self.pending_urls = parsed_urls
                     self.current_url_index = 0
                     
                     self.url_input.setText("Multiple URLs imported")
-                    QMessageBox.information(self, "Import Successful", f"Successfully imported {len(urls)} URLs")
+                    QMessageBox.information(self, "Import Successful", f"Successfully imported {len(parsed_urls)} URLs")
                 else:
                     QMessageBox.warning(self, "Import Failed", "No valid URLs found in the file")
             
@@ -711,13 +729,18 @@ class MainWindow(QMainWindow):
             self.progress_bar.setFormat("%p%")
             return
         
-        url = self.pending_urls[self.current_url_index]
+        current_entry = self.pending_urls[self.current_url_index]
+        url = current_entry['url']
+        episode_id = current_entry['episode_id']
+        
         self.status_text.append(f"\nStarting download {self.current_url_index + 1} of {len(self.pending_urls)}")
         self.status_text.append(f"URL: {url}")
+        if episode_id:
+            self.status_text.append(f"Episode ID: {episode_id}")
         
         self.progress_bar.setFormat(f"%p% (File {self.current_url_index + 1}/{len(self.pending_urls)})")
         
-        options = self._get_download_options()
+        options = self._get_download_options(episode_id)
         self.start_worker(url, options)
 
     def start_single_download(self):
@@ -729,7 +752,7 @@ class MainWindow(QMainWindow):
         options = self._get_download_options()
         self.start_worker(url, options)
 
-    def _get_download_options(self):
+    def _get_download_options(self, episode_id=None):
         format_option = self.format_combo.currentText()
         quality = self.quality_combo.currentText()
         
@@ -748,9 +771,15 @@ class MainWindow(QMainWindow):
         else:  # Audio Only
             format_str = "bestaudio"
         
+        # Modify output template based on episode_id
+        if episode_id:
+            output_template = os.path.join(self.output_path.text(), f'{episode_id}.%(ext)s')
+        else:
+            output_template = os.path.join(self.output_path.text(), '%(title)s.%(ext)s')
+        
         options = {
             'format': format_str,
-            'outtmpl': os.path.join(self.output_path.text(), '%(title)s.%(ext)s'),
+            'outtmpl': output_template,
             'writesubtitles': self.subtitle_check.isChecked(),
             'noplaylist': not self.playlist_check.isChecked(),
             'thread_count': self.thread_spin.value()
