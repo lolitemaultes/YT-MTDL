@@ -2,6 +2,7 @@
 
 import sys
 import os
+from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox,
                            QProgressBar, QTextEdit, QFileDialog, QSpinBox, 
@@ -300,8 +301,8 @@ class DownloadWorker(QThread):
                 'progress_hooks': [self._progress_hook],
                 'concurrent_fragment_downloads': thread_count,
                 'merge_output_format': 'mp4',
-                'ignoreerrors': True,  # Continue on download errors
-                'no_warnings': True    # Reduce warning spam
+                'ignoreerrors': True,  
+                'no_warnings': True    
             }
 
             if 'ratelimit' in self.options:
@@ -382,6 +383,14 @@ class MainWindow(QMainWindow):
         
         # Create UI
         self.init_ui()
+        
+        # Connect URL input changes to format updater
+        self.url_input.textChanged.connect(self.on_url_changed)
+        
+        # Add timer for debouncing
+        self.format_update_timer = QTimer()
+        self.format_update_timer.setSingleShot(True)
+        self.format_update_timer.timeout.connect(self.update_formats)
         
         # Set up status bar
         self.statusBar().showMessage("Ready")
@@ -524,7 +533,7 @@ class MainWindow(QMainWindow):
         # Quality selection
         options_layout.addWidget(QLabel("Quality:"), 0, 2)
         self.quality_combo = QComboBox()
-        self.quality_combo.addItems(["1080p", "720p", "480p", "360p", "Auto"])
+        self.quality_combo.addItems(["Best", "High", "Medium", "Low"])
         options_layout.addWidget(self.quality_combo, 0, 3)
         
         # Checkboxes
@@ -602,6 +611,37 @@ class MainWindow(QMainWindow):
         
         # Set the scroll area's widget
         scroll.setWidget(container)
+
+    def on_url_changed(self, text):
+        # Debounce format updates
+        self.format_update_timer.stop()
+        if text.strip():
+            self.format_update_timer.start(1000)  # Wait 1 second after typing stops
+    
+    def update_formats(self):
+        url = self.url_input.text().strip()
+        if url:
+            self.status_text.append("Fetching available formats...")
+            
+            # Add preset format options first
+            self.format_combo.clear()
+            self.format_combo.addItem("Best Quality", "bestvideo+bestaudio/best")
+            self.format_combo.addItem("High Quality (1080p)", "bestvideo[height<=1080]+bestaudio/best")
+            self.format_combo.addItem("Medium Quality (720p)", "bestvideo[height<=720]+bestaudio/best")
+            self.format_combo.addItem("Low Quality (480p)", "bestvideo[height<=480]+bestaudio/best")
+            self.format_combo.addItem("Audio Only", "bestaudio")
+            
+            # Add a separator
+            self.format_combo.insertSeparator(self.format_combo.count())
+            
+            # Add dynamic formats
+            formats = self.get_available_formats(url)
+            if formats:
+                for fmt in formats:
+                    self.format_combo.addItem(fmt['desc'], fmt['id'])
+                self.status_text.append(f"Found {len(formats)} available formats")
+            else:
+                self.status_text.append("No additional formats found")
 
     def create_settings_tab(self, layout):
         # Download settings
@@ -851,21 +891,99 @@ class MainWindow(QMainWindow):
         options = self._get_download_options()
         self.start_worker(url, options)
 
+    def get_available_formats(self, url):
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                formats = info.get('formats', [])
+                
+                # Create a organized list of formats
+                format_list = []
+                seen_qualities = set()
+                
+                for f in formats:
+                    format_id = f.get('format_id', '')
+                    ext = f.get('ext', '')
+                    filesize = f.get('filesize', 0)
+                    
+                    # Video formats
+                    if f.get('vcodec') != 'none':
+                        height = f.get('height', 0)
+                        fps = f.get('fps', 0)
+                        vcodec = f.get('vcodec', '').split('.')[0]
+                        
+                        quality_str = f"{height}p"
+                        if fps >= 48:
+                            quality_str += f" {fps}fps"
+                        
+                        if f.get('acodec') != 'none':
+                            desc = f"Video+Audio ({quality_str}, {vcodec}, {ext})"
+                        else:
+                            desc = f"Video only ({quality_str}, {vcodec}, {ext})"
+                        
+                        # Avoid duplicate qualities
+                        if (height, fps, 'video') not in seen_qualities:
+                            format_list.append({
+                                'id': format_id,
+                                'desc': desc,
+                                'quality': height,
+                                'type': 'video'
+                            })
+                            seen_qualities.add((height, fps, 'video'))
+                    
+                    # Audio formats
+                    elif f.get('acodec') != 'none':
+                        abr = f.get('abr', 0)
+                        acodec = f.get('acodec', '').split('.')[0]
+                        
+                        desc = f"Audio only ({abr}kbps, {acodec}, {ext})"
+                        
+                        if ('audio', abr) not in seen_qualities:
+                            format_list.append({
+                                'id': format_id,
+                                'desc': desc,
+                                'quality': abr,
+                                'type': 'audio'
+                            })
+                            seen_qualities.add(('audio', abr))
+                
+                # Sort formats by quality
+                format_list.sort(key=lambda x: (x['type'], -x['quality']))
+                
+                return format_list
+                
+        except Exception as e:
+            self.status_text.append(f"Error fetching formats: {str(e)}")
+            return []
+
     def _get_download_options(self, episode_id=None):
         format_option = self.format_combo.currentText()
         quality = self.quality_combo.currentText()
         
+        # Map quality settings to actual resolutions
+        quality_map = {
+            "Best": "2160",  # 4K
+            "High": "1080",
+            "Medium": "720",
+            "Low": "480"
+        }
+        
         if format_option == "Best Quality":
-            if quality == "Auto":
+            if quality == "Best":
                 format_str = "bestvideo+bestaudio/best"
             else:
-                height = quality[:-1]
+                height = quality_map[quality]
                 format_str = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]"
         elif format_option == "Video Only":
-            if quality == "Auto":
+            if quality == "Best":
                 format_str = "bestvideo"
             else:
-                height = quality[:-1]
+                height = quality_map[quality]
                 format_str = f"bestvideo[height<={height}]"
         else:  # Audio Only
             format_str = "bestaudio"
@@ -914,15 +1032,31 @@ class MainWindow(QMainWindow):
             self.cancel_btn.setEnabled(False)
 
     def clear_data(self):
+        # Clear input fields
         self.url_input.clear()
         self.url_list.clear()
         self.progress_bar.setValue(0)
         self.status_text.clear()
+        
+        # Reset progress bar format
+        self.progress_bar.setFormat("%p%")
+        
+        # Re-enable buttons
+        self.download_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        
+        # Clear bulk download data
         if hasattr(self, 'pending_urls'):
             delattr(self, 'pending_urls')
         if hasattr(self, 'current_url_index'):
             delattr(self, 'current_url_index')
+        
+        # Reset placeholders
         self.url_list.setPlaceholderText("Imported URLs will appear here")
+        self.status_text.setPlaceholderText("Download status will appear here")
+        
+        # Update status bar
+        self.update_status_bar()
 
     def update_progress(self, progress):
         if progress['total'] > 0:
