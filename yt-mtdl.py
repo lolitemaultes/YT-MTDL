@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QCheckBox, QTabWidget, QGroupBox, QMessageBox,
                            QScrollArea, QGridLayout, QStatusBar)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer
-from PyQt6.QtGui import QIcon, QFont, QColor, QPixmap, QPalette
+from PyQt6.QtGui import QIcon, QFont, QColor, QPixmap, QPalette, QAction
 import yt_dlp
 import concurrent.futures
 import threading
@@ -267,6 +267,7 @@ class DownloadWorker(QThread):
     progress = pyqtSignal(dict)
     finished = pyqtSignal(bool)
     error = pyqtSignal(str)
+    error_logged = pyqtSignal(dict)  # New signal for error logging
     status_update = pyqtSignal(str)
 
     def __init__(self, url, options):
@@ -281,6 +282,16 @@ class DownloadWorker(QThread):
             thread_count = int(self.options.get('thread_count', 3))
             self.status_update.emit(f"Initializing download with {thread_count} threads...")
 
+            # Ensure output directory exists
+            output_dir = os.path.dirname(self.options.get('outtmpl', ''))
+            if output_dir and not os.path.exists(output_dir):
+                try:
+                    os.makedirs(output_dir, exist_ok=True)
+                except Exception as e:
+                    self.error.emit(f"Failed to create output directory: {str(e)}")
+                    self.finished.emit(False)
+                    return
+
             ydl_opts = {
                 'format': self.options.get('format', 'bestvideo+bestaudio/best'),
                 'outtmpl': self.options.get('outtmpl', '%(title)s.%(ext)s'),
@@ -289,6 +300,8 @@ class DownloadWorker(QThread):
                 'progress_hooks': [self._progress_hook],
                 'concurrent_fragment_downloads': thread_count,
                 'merge_output_format': 'mp4',
+                'ignoreerrors': True,  # Continue on download errors
+                'no_warnings': True    # Reduce warning spam
             }
 
             if 'ratelimit' in self.options:
@@ -299,11 +312,27 @@ class DownloadWorker(QThread):
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 self.status_update.emit("Starting download...")
-                ydl.download([self.url])
+                result = ydl.download([self.url])
                 
-            self.finished.emit(True)
+                if result != 0:
+                    error_info = {
+                        'url': self.url,
+                        'error': 'Download failed with non-zero exit code',
+                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    self.error_logged.emit(error_info)
+                    self.error.emit("Download failed - check error log for details")
+                    self.finished.emit(False)
+                else:
+                    self.finished.emit(True)
 
         except Exception as e:
+            error_info = {
+                'url': self.url,
+                'error': str(e),
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            self.error_logged.emit(error_info)
             self.error.emit(str(e))
             self.finished.emit(False)
 
@@ -362,6 +391,10 @@ class MainWindow(QMainWindow):
         
         # Update UI state
         self.update_status_bar()
+        
+        # Setup Error Logging
+        self.error_log = []  # Store error logs
+        self.setup_error_logging()
 
     def init_ui(self):
         # Create main widget and layout
@@ -723,9 +756,75 @@ class MainWindow(QMainWindow):
         else:
             self.start_single_download()
 
+    def setup_error_logging(self):
+        self.error_log_path = os.path.join(os.path.expanduser('~'), '.ytdl_errors.log')
+        
+        # Create error log menu
+        menubar = self.menuBar()
+        tools_menu = menubar.addMenu('Tools')
+        
+        view_errors_action = QAction('View Error Log', self)
+        view_errors_action.triggered.connect(self.view_error_log)
+        tools_menu.addAction(view_errors_action)
+        
+        save_errors_action = QAction('Save Error Log', self)
+        save_errors_action.triggered.connect(self.save_error_log)
+        tools_menu.addAction(save_errors_action)
+
+    def log_error(self, error_info):
+        self.error_log.append(error_info)
+        self.save_error_log()
+
+    def view_error_log(self):
+        if not self.error_log:
+            QMessageBox.information(self, "Error Log", "No errors logged yet.")
+            return
+
+        log_text = "Error Log:\n\n"
+        for error in self.error_log:
+            log_text += f"Time: {error['timestamp']}\n"
+            log_text += f"URL: {error['url']}\n"
+            log_text += f"Error: {error['error']}\n"
+            log_text += "-" * 50 + "\n"
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Error Log")
+        dialog.setMinimumSize(600, 400)
+        
+        layout = QVBoxLayout(dialog)
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setText(log_text)
+        layout.addWidget(text_edit)
+        
+        dialog.exec()
+
+    def save_error_log(self):
+        try:
+            with open(self.error_log_path, 'w') as f:
+                for error in self.error_log:
+                    f.write(f"Time: {error['timestamp']}\n")
+                    f.write(f"URL: {error['url']}\n")
+                    f.write(f"Error: {error['error']}\n")
+                    f.write("-" * 50 + "\n")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to save error log: {str(e)}")
+
     def start_bulk_download(self):
         if self.current_url_index >= len(self.pending_urls):
-            QMessageBox.information(self, "Complete", "All downloads completed!")
+            if self.error_log:
+                reply = QMessageBox.question(
+                    self,
+                    "Downloads Complete",
+                    f"All downloads completed. {len(self.error_log)} errors occurred. Would you like to view the error log?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                if reply == QMessageBox.Yes:
+                    self.view_error_log()
+            else:
+                QMessageBox.information(self, "Complete", "All downloads completed successfully!")
+            
             self.progress_bar.setFormat("%p%")
             return
         
@@ -799,6 +898,7 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self.download_finished)
         self.worker.error.connect(self.download_error)
         self.worker.status_update.connect(self.update_status)
+        self.worker.error_logged.connect(self.log_error)  # Connect new error logging signal
         self.worker.start()
         
         self.download_btn.setEnabled(False)
