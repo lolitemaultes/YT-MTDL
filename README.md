@@ -2,22 +2,22 @@
 
 # YouTube Multi-Threaded Downloader (YT-MTDL)
 
-A modern, feature-rich desktop application for downloading YouTube videos with multi-threading support and a user-friendly dark-themed interface.
+A modern, feature-rich desktop application for downloading pretty much any video stream, with multi-threading support and a user-friendly dark-themed interface.
 
 ## Features
 
 - **Multi-threaded Downloads**: Optimize download speeds with configurable thread count
+
 - **Batch Processing**: Import multiple URLs from a text file for bulk downloads
-- **Format Selection**: Choose between various quality options and formats
-  - Best Quality (video + audio)
-  - Video Only
-  - Audio Only
-- **Quality Options**: Select from multiple resolution options
-  - 1080p
-  - 720p
-  - 480p
-  - 360p
-  - Auto (best available)
+
+- **Format Selection**: Choose between automatically scanned quality options and formats
+
+- **Quality Options**: Select from multiple standard resolution options
+  - Best
+  - High
+  - Medium
+  - Low
+
 - **Additional Options**:
   - Subtitle downloads
   - Playlist support
@@ -42,15 +42,17 @@ pip install PyQt6 yt-dlp
 
 ## Usage
 
+***Please keep in mind that some m3u8 downloads will download seperate audio and video channels. It will merge them at the end of the download.***
+
 ### Basic Download
 1. Launch the application
-2. Enter a YouTube URL in the input field
+2. Enter a YouTube or other video URL in the input field
 3. Select desired format and quality options
 4. Choose output directory (defaults to Downloads folder)
 5. Click "Download" to start
 
 ### Batch Downloads
-1. Create a text file with YouTube URLs (one per line)
+1. Create a text file with stream URLs (one per line)
 2. Optional: Add episode identifiers before URLs (e.g., "EP01 https://youtube.com/...")
 3. Click "Import URLs" and select your text file
 4. Configure download options
