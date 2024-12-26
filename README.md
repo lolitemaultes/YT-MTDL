@@ -1,6 +1,6 @@
 ![Untitled](https://github.com/user-attachments/assets/ec7ca53c-42f5-483f-b7c0-8919fad33808)
 
-# YouTube Multi-Threaded Downloader (YT-MTDL)
+# YouTube Multi-Threaded Downloader (yt-mtdl)
 
 A modern, feature-rich desktop application for downloading pretty much any video stream, with multi-threading support and a user-friendly dark-themed interface.
 
