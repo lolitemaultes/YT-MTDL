@@ -804,7 +804,9 @@ class MainWindow(QMainWindow):
                     self.pending_urls = parsed_urls
                     self.current_url_index = 0
                     
-                    self.url_input.setText("Multiple URLs imported")
+                    # Remove this line:
+                    # self.url_input.setText("Multiple URLs imported")
+                    
                     QMessageBox.information(self, "Import Successful", f"Successfully imported {len(parsed_urls)} URLs")
                 else:
                     QMessageBox.warning(self, "Import Failed", "No valid URLs found in the file")
@@ -1008,6 +1010,7 @@ class MainWindow(QMainWindow):
         else:
             output_template = os.path.join(self.output_path.text(), '%(title)s.%(ext)s')
     
+        # Base options
         options = {
             'outtmpl': output_template,
             'writesubtitles': self.subtitle_check.isChecked(),
@@ -1016,6 +1019,17 @@ class MainWindow(QMainWindow):
             'keepvideo': False,
         }
     
+        # Handle quality selection for video formats
+        quality_map = {
+            "Best": None,  # No limit = best available
+            "High": "1080",
+            "Medium": "720",
+            "Low": "480"
+        }
+        selected_quality = self.quality_combo.currentText()
+        height_limit = quality_map[selected_quality]
+    
+        # Format selection
         if format_data and format_data['type'] == 'audio':
             ext = format_data['ext']
             options.update({
@@ -1028,7 +1042,7 @@ class MainWindow(QMainWindow):
                 }],
                 'extractaudio': True,
                 'addmetadata': True,
-                'writethumbnail': False,  # Removed thumbnail download
+                'writethumbnail': False,
                 'postprocessor_args': [
                     '-vn',
                     '-acodec', {'mp3': 'libmp3lame', 'wav': 'pcm_s16le', 'flac': 'flac'}[ext],
@@ -1038,8 +1052,14 @@ class MainWindow(QMainWindow):
                 ],
             })
         else:
+            # Video format selection with quality consideration
+            if height_limit:
+                format_str = f'bestvideo[height<={height_limit}]+bestaudio/best[height<={height_limit}]'
+            else:
+                format_str = 'bestvideo+bestaudio/best'
+            
             options.update({
-                'format': format_data['id'] if format_data else 'bestvideo+bestaudio/best',
+                'format': format_str,
                 'merge_output_format': 'mp4'
             })
     
@@ -1119,18 +1139,17 @@ class MainWindow(QMainWindow):
             else:
                 self.progress_bar.setFormat(f"{percentage:.1f}%")
             
-            # Fix for speed calculation when None
             speed = progress.get('speed')
-            eta = progress.get('eta', 0)
+            eta = progress.get('eta')  # Get eta the same way as speed
             
             status = (f"Downloading {os.path.basename(progress['filename'])}: "
                      f"{progress['downloaded'] / 1024 / 1024:.1f}MB / "
                      f"{progress['total'] / 1024 / 1024:.1f}MB")
             
-            if speed is not None and speed > 0:  # Only add speed if it's available
+            if speed is not None and speed > 0:
                 speed_mb = speed / 1024 / 1024
                 status += f" ({speed_mb:.1f} MB/s)"
-            if eta > 0:
+            if eta is not None and eta > 0:  # Check if eta is not None before comparing
                 status += f" [ETA: {eta}s]"
             
             self.status_text.append(status)
