@@ -1,6 +1,6 @@
 ![Untitled](https://github.com/user-attachments/assets/ec7ca53c-42f5-483f-b7c0-8919fad33808)
 
-# YT-MTDL - Usage Media
+# YT-MTDL - Usage Examples
 
 - ### Main Menu
 
