@@ -1109,7 +1109,7 @@ class MainWindow(QMainWindow):
             if 'percent' in progress:
                 self.progress_bar.setValue(int(progress['percent']))
             return
-            
+                
         if progress['total'] > 0:
             percentage = (progress['downloaded'] / progress['total']) * 100
             self.progress_bar.setValue(int(percentage))
@@ -1119,15 +1119,17 @@ class MainWindow(QMainWindow):
             else:
                 self.progress_bar.setFormat(f"{percentage:.1f}%")
             
-            speed = progress.get('speed', 0) / 1024 / 1024
+            # Fix for speed calculation when None
+            speed = progress.get('speed')
             eta = progress.get('eta', 0)
             
             status = (f"Downloading {os.path.basename(progress['filename'])}: "
                      f"{progress['downloaded'] / 1024 / 1024:.1f}MB / "
                      f"{progress['total'] / 1024 / 1024:.1f}MB")
             
-            if speed > 0:
-                status += f" ({speed:.1f} MB/s)"
+            if speed is not None and speed > 0:  # Only add speed if it's available
+                speed_mb = speed / 1024 / 1024
+                status += f" ({speed_mb:.1f} MB/s)"
             if eta > 0:
                 status += f" [ETA: {eta}s]"
             
