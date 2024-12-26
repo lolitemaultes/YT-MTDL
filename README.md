@@ -44,6 +44,8 @@ pip install PyQt6 yt-dlp
 
 ***Please keep in mind that some m3u8 downloads will download seperate audio and video channels. It will merge them at the end of the download.***
 
+***[See Usage Examples](https://github.com/lolitemaultes/yt-mtdl/blob/main/USE.md)***
+
 ***[Test Downloading Capabilities](https://github.com/lolitemaultes/m3u8-urls)***
 
 ### Basic Download
