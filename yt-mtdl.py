@@ -282,17 +282,8 @@ class DownloadWorker(QThread):
         try:
             thread_count = int(self.options.get('thread_count', 3))
             self.status_update.emit(f"Initializing download with {thread_count} threads...")
-
-            # Ensure output directory exists
-            output_dir = os.path.dirname(self.options.get('outtmpl', ''))
-            if output_dir and not os.path.exists(output_dir):
-                try:
-                    os.makedirs(output_dir, exist_ok=True)
-                except Exception as e:
-                    self.error.emit(f"Failed to create output directory: {str(e)}")
-                    self.finished.emit(False)
-                    return
-
+    
+            # Base ydl options with quiet settings
             ydl_opts = {
                 'format': self.options.get('format', 'bestvideo+bestaudio/best'),
                 'outtmpl': self.options.get('outtmpl', '%(title)s.%(ext)s'),
@@ -300,33 +291,59 @@ class DownloadWorker(QThread):
                 'noplaylist': self.options.get('noplaylist', True),
                 'progress_hooks': [self._progress_hook],
                 'concurrent_fragment_downloads': thread_count,
-                'merge_output_format': 'mp4',
-                'ignoreerrors': True,  
-                'no_warnings': True    
+                'ignoreerrors': True,
+                'no_warnings': True,
+                'quiet': True,
+                'no_color': True,
+                'paths': {'temp': os.path.join(os.path.dirname(self.options.get('outtmpl', '')), '.temp')},
+                'keepvideo': self.options.get('keepvideo', False),
+                'postprocessors': self.options.get('postprocessors', []),
+                'extractaudio': self.options.get('extractaudio', False),
+                'addmetadata': self.options.get('addmetadata', False),
+                'writethumbnail': self.options.get('writethumbnail', False),
             }
-
+    
+            # Add postprocessor_args if present
+            if 'postprocessor_args' in self.options:
+                ydl_opts['postprocessor_args'] = self.options['postprocessor_args']
+    
             if 'ratelimit' in self.options:
                 ydl_opts['ratelimit'] = self.options['ratelimit']
-
+    
             if 'proxy' in self.options:
                 ydl_opts['proxy'] = self.options['proxy']
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                self.status_update.emit("Starting download...")
-                result = ydl.download([self.url])
-                
-                if result != 0:
-                    error_info = {
-                        'url': self.url,
-                        'error': 'Download failed with non-zero exit code',
-                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    }
-                    self.error_logged.emit(error_info)
-                    self.error.emit("Download failed - check error log for details")
-                    self.finished.emit(False)
-                else:
-                    self.finished.emit(True)
-
+    
+            # Add any merge format options
+            if 'merge_output_format' in self.options:
+                ydl_opts['merge_output_format'] = self.options['merge_output_format']
+    
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    self.status_update.emit("Starting download...")
+                    result = ydl.download([self.url])
+                    
+                    if result != 0:
+                        error_info = {
+                            'url': self.url,
+                            'error': 'Download failed with non-zero exit code',
+                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                        self.error_logged.emit(error_info)
+                        self.error.emit("Download failed - check error log for details")
+                        self.finished.emit(False)
+                    else:
+                        self.finished.emit(True)
+    
+            except yt_dlp.utils.DownloadError as e:
+                error_info = {
+                    'url': self.url,
+                    'error': f"Download error: {str(e)}",
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.error_logged.emit(error_info)
+                self.error.emit(f"Download error: {str(e)}")
+                self.finished.emit(False)
+    
         except Exception as e:
             error_info = {
                 'url': self.url,
@@ -356,14 +373,27 @@ class DownloadWorker(QThread):
                 self.progress.emit(progress)
                 
                 if 'speed' in d and d['speed']:
-                    speed = d['speed'] / 1024 / 1024  # Convert to MB/s
+                    speed = d['speed'] / 1024 / 1024
                     status = f"Downloading at {speed:.1f} MB/s"
                     if d.get('eta'):
                         status += f" (ETA: {d['eta']} seconds)"
                     self.status_update.emit(status)
         
         elif d['status'] == 'finished':
-            self.status_update.emit(f"Finished downloading {d.get('filename', 'file')}")
+            self.status_update.emit(f"Download complete, starting conversion...")
+            self.progress.emit({'format': "Converting...", 'percent': 0})
+        
+        elif d['status'] == 'started_conversion':
+            self.status_update.emit("Starting audio conversion...")
+            self.progress.emit({'format': "Converting...", 'percent': 0})
+        
+        elif d['status'] == 'converting':
+            if d.get('postprocessor') == 'FFmpegExtractAudio':
+                # For audio conversion, try different percentage indicators
+                percent = d.get('percent', d.get('progress', 0) * 100)
+                if percent:
+                    self.progress.emit({'format': f"Converting... {percent:.1f}%", 'percent': percent})
+                    self.status_update.emit(f"Converting audio: {percent:.1f}% complete")
 
     def cancel(self):
         self.is_cancelled = True
@@ -391,6 +421,10 @@ class MainWindow(QMainWindow):
         self.format_update_timer = QTimer()
         self.format_update_timer.setSingleShot(True)
         self.format_update_timer.timeout.connect(self.update_formats)
+        
+        # Set up download information
+        self.successful_downloads = 0
+        self.failed_downloads = 0
         
         # Set up status bar
         self.statusBar().showMessage("Ready")
@@ -621,27 +655,15 @@ class MainWindow(QMainWindow):
     def update_formats(self):
         url = self.url_input.text().strip()
         if url:
-            self.status_text.append("Fetching available formats...")
+            self.status_text.append("Loading available formats...")
             
-            # Add preset format options first
             self.format_combo.clear()
-            self.format_combo.addItem("Best Quality", "bestvideo+bestaudio/best")
-            self.format_combo.addItem("High Quality (1080p)", "bestvideo[height<=1080]+bestaudio/best")
-            self.format_combo.addItem("Medium Quality (720p)", "bestvideo[height<=720]+bestaudio/best")
-            self.format_combo.addItem("Low Quality (480p)", "bestvideo[height<=480]+bestaudio/best")
-            self.format_combo.addItem("Audio Only", "bestaudio")
-            
-            # Add a separator
-            self.format_combo.insertSeparator(self.format_combo.count())
-            
-            # Add dynamic formats
             formats = self.get_available_formats(url)
-            if formats:
-                for fmt in formats:
-                    self.format_combo.addItem(fmt['desc'], fmt['id'])
-                self.status_text.append(f"Found {len(formats)} available formats")
-            else:
-                self.status_text.append("No additional formats found")
+            
+            for fmt in formats:
+                self.format_combo.addItem(fmt['desc'], fmt)
+            
+            self.status_text.append("Formats loaded successfully")
 
     def create_settings_tab(self, layout):
         # Download settings
@@ -852,19 +874,28 @@ class MainWindow(QMainWindow):
 
     def start_bulk_download(self):
         if self.current_url_index >= len(self.pending_urls):
-            if self.error_log:
+            total_downloads = len(self.pending_urls)
+            success_count = self.successful_downloads
+            error_count = self.failed_downloads
+            
+            summary_msg = f"Downloads completed!\n\nSuccessful: {success_count}\nFailed: {error_count}"
+            
+            if error_count > 0:
                 reply = QMessageBox.question(
                     self,
                     "Downloads Complete",
-                    f"All downloads completed. {len(self.error_log)} errors occurred. Would you like to view the error log?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes
+                    f"{summary_msg}\n\nWould you like to view the error log?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
                 )
-                if reply == QMessageBox.Yes:
+                if reply == QMessageBox.StandardButton.Yes:
                     self.view_error_log()
             else:
-                QMessageBox.information(self, "Complete", "All downloads completed successfully!")
+                QMessageBox.information(self, "Complete", summary_msg)
             
+            # Reset counters
+            self.successful_downloads = 0
+            self.failed_downloads = 0
             self.progress_bar.setFormat("%p%")
             return
         
@@ -902,59 +933,66 @@ class MainWindow(QMainWindow):
                 info = ydl.extract_info(url, download=False)
                 formats = info.get('formats', [])
                 
-                # Create a organized list of formats
-                format_list = []
-                seen_qualities = set()
+                # Start with standard video quality options
+                format_list = [
+                    {
+                        'id': 'bestvideo[height<=2160]+bestaudio/best',
+                        'desc': 'Video (4K)',
+                        'quality': 2160,
+                        'type': 'video'
+                    },
+                    {
+                        'id': 'bestvideo[height<=1440]+bestaudio/best',
+                        'desc': 'Video (1440p)',
+                        'quality': 1440,
+                        'type': 'video'
+                    },
+                    {
+                        'id': 'bestvideo[height<=1080]+bestaudio/best',
+                        'desc': 'Video (1080p)',
+                        'quality': 1080,
+                        'type': 'video'
+                    },
+                    {
+                        'id': 'bestvideo[height<=720]+bestaudio/best',
+                        'desc': 'Video (720p)',
+                        'quality': 720,
+                        'type': 'video'
+                    },
+                    {
+                        'id': 'bestvideo[height<=480]+bestaudio/best',
+                        'desc': 'Video (480p)',
+                        'quality': 480,
+                        'type': 'video'
+                    }
+                ]
                 
-                for f in formats:
-                    format_id = f.get('format_id', '')
-                    ext = f.get('ext', '')
-                    filesize = f.get('filesize', 0)
-                    
-                    # Video formats
-                    if f.get('vcodec') != 'none':
-                        height = f.get('height', 0)
-                        fps = f.get('fps', 0)
-                        vcodec = f.get('vcodec', '').split('.')[0]
-                        
-                        quality_str = f"{height}p"
-                        if fps >= 48:
-                            quality_str += f" {fps}fps"
-                        
-                        if f.get('acodec') != 'none':
-                            desc = f"Video+Audio ({quality_str}, {vcodec}, {ext})"
-                        else:
-                            desc = f"Video only ({quality_str}, {vcodec}, {ext})"
-                        
-                        # Avoid duplicate qualities
-                        if (height, fps, 'video') not in seen_qualities:
-                            format_list.append({
-                                'id': format_id,
-                                'desc': desc,
-                                'quality': height,
-                                'type': 'video'
-                            })
-                            seen_qualities.add((height, fps, 'video'))
-                    
-                    # Audio formats
-                    elif f.get('acodec') != 'none':
-                        abr = f.get('abr', 0)
-                        acodec = f.get('acodec', '').split('.')[0]
-                        
-                        desc = f"Audio only ({abr}kbps, {acodec}, {ext})"
-                        
-                        if ('audio', abr) not in seen_qualities:
-                            format_list.append({
-                                'id': format_id,
-                                'desc': desc,
-                                'quality': abr,
-                                'type': 'audio'
-                            })
-                            seen_qualities.add(('audio', abr))
+                # Add audio format options
+                audio_formats = [
+                    {
+                        'id': 'bestaudio/best',
+                        'desc': 'Audio (MP3)',
+                        'quality': 0,
+                        'type': 'audio',
+                        'ext': 'mp3'
+                    },
+                    {
+                        'id': 'bestaudio/best',
+                        'desc': 'Audio (WAV)',
+                        'quality': 0,
+                        'type': 'audio',
+                        'ext': 'wav'
+                    },
+                    {
+                        'id': 'bestaudio/best',
+                        'desc': 'Audio (FLAC)',
+                        'quality': 0,
+                        'type': 'audio',
+                        'ext': 'flac'
+                    }
+                ]
                 
-                # Sort formats by quality
-                format_list.sort(key=lambda x: (x['type'], -x['quality']))
-                
+                format_list.extend(audio_formats)
                 return format_list
                 
         except Exception as e:
@@ -962,52 +1000,55 @@ class MainWindow(QMainWindow):
             return []
 
     def _get_download_options(self, episode_id=None):
-        format_option = self.format_combo.currentText()
-        quality = self.quality_combo.currentText()
+        selected_format = self.format_combo.currentIndex()
+        format_data = self.format_combo.itemData(selected_format)
         
-        # Map quality settings to actual resolutions
-        quality_map = {
-            "Best": "2160",  # 4K
-            "High": "1080",
-            "Medium": "720",
-            "Low": "480"
-        }
-        
-        if format_option == "Best Quality":
-            if quality == "Best":
-                format_str = "bestvideo+bestaudio/best"
-            else:
-                height = quality_map[quality]
-                format_str = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]"
-        elif format_option == "Video Only":
-            if quality == "Best":
-                format_str = "bestvideo"
-            else:
-                height = quality_map[quality]
-                format_str = f"bestvideo[height<={height}]"
-        else:  # Audio Only
-            format_str = "bestaudio"
-        
-        # Modify output template based on episode_id
         if episode_id:
             output_template = os.path.join(self.output_path.text(), f'{episode_id}.%(ext)s')
         else:
             output_template = os.path.join(self.output_path.text(), '%(title)s.%(ext)s')
-        
+    
         options = {
-            'format': format_str,
             'outtmpl': output_template,
             'writesubtitles': self.subtitle_check.isChecked(),
             'noplaylist': not self.playlist_check.isChecked(),
-            'thread_count': self.thread_spin.value()
+            'thread_count': self.thread_spin.value(),
+            'keepvideo': False,
         }
-        
+    
+        if format_data and format_data['type'] == 'audio':
+            ext = format_data['ext']
+            options.update({
+                'format': 'bestaudio/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': ext,
+                    'preferredquality': '320' if ext == 'mp3' else None,
+                    'nopostoverwrites': False
+                }],
+                'extractaudio': True,
+                'addmetadata': True,
+                'writethumbnail': False,  # Removed thumbnail download
+                'postprocessor_args': [
+                    '-vn',
+                    '-acodec', {'mp3': 'libmp3lame', 'wav': 'pcm_s16le', 'flac': 'flac'}[ext],
+                    '-ar', '44100',
+                    '-ac', '2',
+                    '-b:a', '320k'
+                ],
+            })
+        else:
+            options.update({
+                'format': format_data['id'] if format_data else 'bestvideo+bestaudio/best',
+                'merge_output_format': 'mp4'
+            })
+    
         if self.use_proxy.isChecked() and self.proxy_input.text().strip():
             options['proxy'] = self.proxy_input.text().strip()
         
         if self.rate_limit.value() > 0:
             options['ratelimit'] = self.rate_limit.value() * 1024
-        
+    
         return options
 
     def start_worker(self, url, options):
@@ -1041,6 +1082,10 @@ class MainWindow(QMainWindow):
         # Reset progress bar format
         self.progress_bar.setFormat("%p%")
         
+        # Reset Downloads
+        self.successful_downloads = 0
+        self.failed_downloads = 0
+        
         # Re-enable buttons
         self.download_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
@@ -1059,9 +1104,14 @@ class MainWindow(QMainWindow):
         self.update_status_bar()
 
     def update_progress(self, progress):
+        if 'format' in progress:
+            self.progress_bar.setFormat(progress['format'])
+            if 'percent' in progress:
+                self.progress_bar.setValue(int(progress['percent']))
+            return
+            
         if progress['total'] > 0:
             percentage = (progress['downloaded'] / progress['total']) * 100
-            
             self.progress_bar.setValue(int(percentage))
             
             if hasattr(self, 'pending_urls'):
@@ -1069,7 +1119,7 @@ class MainWindow(QMainWindow):
             else:
                 self.progress_bar.setFormat(f"{percentage:.1f}%")
             
-            speed = progress.get('speed', 0) / 1024 / 1024  # Convert to MB/s
+            speed = progress.get('speed', 0) / 1024 / 1024
             eta = progress.get('eta', 0)
             
             status = (f"Downloading {os.path.basename(progress['filename'])}: "
@@ -1091,28 +1141,33 @@ class MainWindow(QMainWindow):
 
     def download_finished(self, success):
         if success:
+            self.successful_downloads += 1
             if hasattr(self, 'pending_urls'):
                 self.current_url_index += 1
+                self.progress_bar.setFormat("%p%")
                 QTimer.singleShot(2000, self.start_bulk_download)
             else:
                 self.download_btn.setEnabled(True)
                 self.cancel_btn.setEnabled(False)
-                self.status_text.append("Download completed successfully!")
-                QMessageBox.information(self, "Success", "Download completed successfully!")
+                self.status_text.append("Download and conversion completed successfully!")
+                self.progress_bar.setFormat("%p%")
+        else:
+            self.failed_downloads += 1
         
         self.progress_bar.setValue(100)
         self.update_status_bar()
 
     def download_error(self, error_msg):
-        self.status_text.append(f"Error: {error_msg}")
+        self.status_text.append(f"Error: {error_msg}")  # Keep this for the status text only
         self.download_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self.progress_bar.setValue(0)
-        QMessageBox.critical(self, "Error", f"Download failed: {error_msg}")
+        
+        # Remove the QMessageBox.critical popup
         
         if hasattr(self, 'pending_urls'):
             self.current_url_index += 1
-            QTimer.singleShot(2000, self.start_bulk_download)
+            QTimer.singleShot(1000, self.start_bulk_download)  # Reduced delay to 1 second
 
     def update_status_bar(self):
         if not hasattr(self, 'status_label'):
@@ -1183,11 +1238,11 @@ class MainWindow(QMainWindow):
                 self,
                 "Confirm Exit",
                 "A download is in progress. Are you sure you want to exit?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
             )
             
-            if reply == QMessageBox.Yes:
+            if reply == QMessageBox.StandardButton.Yes:
                 self.worker.cancel()
                 event.accept()
             else:
